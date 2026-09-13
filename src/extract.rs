@@ -68,7 +68,7 @@ pub fn extract(text: &str, cwd: &Path, exists: &dyn Fn(&Path) -> bool) -> Vec<Sc
 /// True for characters that may appear inside a path token (including the `:`
 /// used by the trailing `:line[:col]` suffix).
 fn is_path_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | '~' | '@' | ':')
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | '\\' | '~' | '@' | ':')
 }
 
 /// Trim surrounding punctuation (quotes, brackets, commas, …) from a token.
@@ -76,35 +76,60 @@ fn trim_edges(s: &str) -> &str {
     s.trim_matches(|c: char| !is_path_char(c))
 }
 
+/// Peel one trailing `:<digits>` group off `s`, returning the remainder and the
+/// parsed number, or `None` if the tail after the last `:` is not all digits.
+fn strip_trailing_number(s: &str) -> Option<(&str, u32)> {
+    let colon = s.rfind(':')?;
+    let tail = &s[colon + 1..];
+    if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((&s[..colon], tail.parse().ok()?))
+}
+
 /// Decide whether `tok` is path-shaped and split off any trailing line number.
 ///
 /// Returns `(path, line)` on success. Applies an extension-or-slash heuristic so
 /// prose like `and/or` is ignored while `src/main.rs` is kept.
 pub(crate) fn parse_token(tok: &str) -> Option<(&str, Option<u32>)> {
-    let mut parts = tok.split(':');
-    let path = parts.next()?;
+    // A `scheme://` token is a URL, not a file path (`file://` links are handled
+    // by the open-link handler, other URLs go to the browser). The old
+    // split-on-first-colon parse rejected these implicitly; the right-to-left
+    // parse below would otherwise accept `http://host/x.rs` as a path.
+    if tok.contains("://") {
+        return None;
+    }
+    // Peel numeric suffixes from the right (`path:line:col` -> `path`, line) so a
+    // Windows drive prefix such as `C:` is never mistaken for a line separator.
+    let (mut path, mut line) = (tok, None);
+    if let Some((rest, first)) = strip_trailing_number(path) {
+        if let Some((rest2, real_line)) = strip_trailing_number(rest) {
+            // `path:line:col` — `first` was the column, keep the line.
+            path = rest2;
+            line = Some(real_line);
+        } else {
+            // `path:line` — `first` was the line.
+            path = rest;
+            line = Some(first);
+        }
+    }
 
     // Must look like a path: contain a separator and either be absolute /
     // home-relative, an explicit `./`|`../` reference, or carry a file
     // extension in its final segment.
-    if !path.contains('/') {
+    if !path.contains('/') && !path.contains('\\') {
         return None;
     }
-    let is_abs = path.starts_with('/') || path.starts_with('~');
-    let is_dotslash = path.starts_with("./") || path.starts_with("../");
-    let last = path.rsplit('/').next().unwrap_or("");
+    let is_abs = Path::new(path).is_absolute() || path.starts_with('~');
+    let is_dotslash = path.starts_with("./")
+        || path.starts_with("../")
+        || path.starts_with(r".\")
+        || path.starts_with(r"..\");
+    let last = path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or("");
     let has_ext = last.contains('.');
     if !(is_abs || is_dotslash || has_ext) {
         return None;
     }
-
-    let line = parts.next().and_then(|s| {
-        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
-            s.parse::<u32>().ok()
-        } else {
-            None
-        }
-    });
 
     Some((path, line))
 }
@@ -114,7 +139,7 @@ pub(crate) fn resolve(path: &str, cwd: &Path) -> PathBuf {
     let expanded = if let Some(rest) = path.strip_prefix('~') {
         let home = std::env::var("HOME").unwrap_or_default();
         PathBuf::from(format!("{home}{rest}"))
-    } else if path.starts_with('/') {
+    } else if Path::new(path).is_absolute() || path.starts_with('/') {
         PathBuf::from(path)
     } else {
         cwd.join(path)
@@ -146,6 +171,14 @@ mod tests {
         true
     }
 
+    fn normalized(path: &str) -> String {
+        #[cfg(windows)]
+        let path = path.replace('/', "\\");
+        #[cfg(not(windows))]
+        let path = path.to_owned();
+        Path::new(&path).to_string_lossy().into_owned()
+    }
+
     #[test]
     fn extracts_absolute_with_line() {
         let c = extract(
@@ -156,7 +189,7 @@ mod tests {
         assert_eq!(
             c,
             vec![ScrapedPath {
-                path: "/tmp/a/b.rs".into(),
+                path: normalized("/tmp/a/b.rs"),
                 line: Some(42)
             }]
         );
@@ -165,13 +198,13 @@ mod tests {
     #[test]
     fn resolves_relative_against_cwd() {
         let c = extract("modified src/main.rs", Path::new("/repo"), &always);
-        assert_eq!(c[0].path, "/repo/src/main.rs");
+        assert_eq!(c[0].path, normalized("/repo/src/main.rs"));
     }
 
     #[test]
     fn strips_box_chrome() {
         let c = extract("│ ● /tmp/x.py │", Path::new("/"), &always);
-        assert_eq!(c[0].path, "/tmp/x.py");
+        assert_eq!(c[0].path, normalized("/tmp/x.py"));
     }
 
     #[test]
@@ -181,11 +214,11 @@ mod tests {
         assert_eq!(
             c[0],
             ScrapedPath {
-                path: "/tmp/old.rs".into(),
+                path: normalized("/tmp/old.rs"),
                 line: Some(9)
             }
         );
-        assert_eq!(c[1].path, "/tmp/a.rs");
+        assert_eq!(c[1].path, normalized("/tmp/a.rs"));
         assert_eq!(c.len(), 2);
     }
 
@@ -196,10 +229,43 @@ mod tests {
     }
 
     #[test]
+    fn ignores_scheme_urls() {
+        // A bare http(s) URL is not a file path candidate, even though its final
+        // segment carries an extension.
+        assert_eq!(parse_token("http://foo/bar.rs"), None);
+        assert_eq!(parse_token("https://example.com/a/b.py:12"), None);
+        // A real path is still parsed, including line:col.
+        assert_eq!(
+            parse_token("src/main.rs:42:7"),
+            Some(("src/main.rs", Some(42)))
+        );
+        assert_eq!(
+            parse_token("src/main.rs:42"),
+            Some(("src/main.rs", Some(42)))
+        );
+        assert_eq!(parse_token("src/main.rs"), Some(("src/main.rs", None)));
+    }
+
+    #[test]
     fn tilde_expands() {
         std::env::set_var("HOME", "/home/u");
         let c = extract("see ~/notes.md", Path::new("/"), &always);
-        assert_eq!(c[0].path, "/home/u/notes.md");
+        assert_eq!(c[0].path, normalized("/home/u/notes.md"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extracts_windows_drive_path_with_line() {
+        let c = extract(
+            r"changed C:\repo\src\main.rs:42",
+            Path::new(r"C:\repo"),
+            &always,
+        );
+        assert_eq!(
+            c[0].path,
+            Path::new(r"C:\repo\src\main.rs").to_string_lossy()
+        );
+        assert_eq!(c[0].line, Some(42));
     }
 
     #[test]
