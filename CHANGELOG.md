@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/ChmaraX/herdr-nvim/compare/v1.0.0...v1.0.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* add Windows support for herdr-nvim ([#30](https://github.com/ChmaraX/herdr-nvim/issues/30)) ([84fdf52](https://github.com/ChmaraX/herdr-nvim/commit/84fdf5246234af46b35c8cc4f328412da06a8bd4))
+* sidebar and anchor pane render at stale size until a manual resize ([#31](https://github.com/ChmaraX/herdr-nvim/issues/31)) ([581ea22](https://github.com/ChmaraX/herdr-nvim/commit/581ea220e748127fd8827a12f5074cb17487b2c6))
+
 ## [1.0.0](https://github.com/ChmaraX/herdr-nvim/compare/v0.3.0...v1.0.0) (2026-09-03)
 
 
