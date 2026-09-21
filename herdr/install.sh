@@ -4,6 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p bin
+# Never leave a partial/rejected download behind, on any exit route.
+trap 'rm -f bin/herdr-nvim.tmp' EXIT
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' herdr-plugin.toml | head -1)
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)  target=aarch64-apple-darwin ;;
@@ -37,13 +39,15 @@ if [ -n "$target" ] && curl -fsSL "$url" -o bin/herdr-nvim.tmp; then
   # the binary itself never ran (wrong libc, wrong arch, truncated
   # download, ...), and the source build below is the correct response,
   # not a "the fetch failed" special case.
+  # Let the probe's own stderr through: on a broken prebuilt this is where
+  # the real reason (e.g. "version `GLIBC_2.38' not found") surfaces, which
+  # matters when the source-build fallback is also unavailable.
   status=0
-  ./bin/herdr-nvim.tmp >/dev/null 2>&1 || status=$?
+  ./bin/herdr-nvim.tmp >/dev/null || status=$?
   if [ "$status" -eq 2 ]; then
     mv bin/herdr-nvim.tmp bin/herdr-nvim
   else
     echo "herdr-nvim: prebuilt binary for ${target} did not run (exit ${status}); falling back to a source build" >&2
-    rm -f bin/herdr-nvim.tmp
     build_from_source
   fi
 else
